@@ -106,6 +106,89 @@ def test_identical_images_yield_ambiguous_empty_mask(tmp_path):
     assert mask.sum() == 0
 
 
+@pytest.mark.parametrize("batched", [False, True])
+def test_uniformity_gate_preserves_large_local_edit(tmp_path, batched):
+    """High mean alone must not erase the boundary of a large local edit."""
+    real = np.full((64, 64, 3), 100, dtype=np.uint8)
+    edited = real.copy()
+    edited[:, :40] = [220, 30, 30]
+    triplet = _write_triplet(tmp_path, real, edited)
+    config = MaskGeneratorConfig(global_max_cv=0.5)
+    gen = MaskGenerator(signals=[LabPixelDiff()], config=config)
+    path = tmp_path / "mask.png"
+    art = gen.generate_batch([triplet], [path])[0] if batched else gen.generate(triplet, path)
+    mask = np.asarray(Image.open(path)) > 127
+    assert art.edit_scope == "local"
+    assert mask[:, :36].mean() > 0.95
+    assert not mask[:, 44:].any()
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_uniformity_gate_keeps_uniform_global_shift(tmp_path, batched):
+    """A spatially uniform colour shift still requires a whole-image mask."""
+    real = np.full((64, 64, 3), 100, dtype=np.uint8)
+    edited = np.full_like(real, 160)
+    triplet = _write_triplet(tmp_path, real, edited)
+    config = MaskGeneratorConfig(global_max_cv=0.5)
+    gen = MaskGenerator(signals=[LabPixelDiff()], config=config)
+    path = tmp_path / "mask.png"
+    art = gen.generate_batch([triplet], [path])[0] if batched else gen.generate(triplet, path)
+    assert art.edit_scope == "global"
+    assert (np.asarray(Image.open(path)) > 127).all()
+
+
+def test_route_signal_subset_ignores_perceptual_spillover(tmp_path):
+    """LPIPS spillover may affect Otsu but must not force selected-signal routing."""
+    local = np.zeros((64, 64), dtype=np.float32)
+    local[:, :16] = 0.9
+    spill = np.full_like(local, 0.6)
+    img = np.full((64, 64, 3), 100, dtype=np.uint8)
+    triplet = _write_triplet(tmp_path, img, img)
+    config = MaskGeneratorConfig(global_route_signals=["lab_pixel", "ssim"])
+    gen = MaskGenerator(
+        signals=[
+            ConstantSignal("lab_pixel", local), ConstantSignal("ssim", local),
+            ConstantSignal("lpips", spill),
+        ],
+        config=config,
+    )
+    art = gen.generate(triplet, tmp_path / "mask.png")
+    mask = np.asarray(Image.open(art.mask_path)) > 127
+    assert art.edit_scope == "local"
+    assert mask[:, :12].all()
+    assert not mask[:, 20:].any()
+
+
+def test_uniformity_gate_keeps_nonconstant_global_shift(tmp_path):
+    """Clipping makes a genuine full-image colour shift nonconstant."""
+    real = np.random.default_rng(0).integers(0, 256, (64, 64, 3), dtype=np.uint8)
+    edited = np.clip(real.astype(int) + 60, 0, 255).astype(np.uint8)
+    triplet = _write_triplet(tmp_path, real, edited)
+    gen = MaskGenerator(
+        signals=[LabPixelDiff()], config=MaskGeneratorConfig(global_max_cv=0.5)
+    )
+    art = gen.generate(triplet, tmp_path / "mask.png")
+    assert art.edit_scope == "global"
+    assert (np.asarray(Image.open(art.mask_path)) > 127).all()
+
+
+@pytest.mark.parametrize("selected", [[], ["missing"]])
+def test_route_signal_subset_rejects_unavailable_signals(selected):
+    with pytest.raises(ValueError, match="global_route_signals"):
+        MaskGenerator(
+            signals=[LabPixelDiff()],
+            config=MaskGeneratorConfig(global_route_signals=selected),
+        )
+
+
+@pytest.mark.parametrize("max_cv", [-1, float("nan"), float("inf")])
+def test_uniformity_gate_rejects_invalid_bounds(max_cv):
+    with pytest.raises(ValueError, match="global_max_cv"):
+        MaskGenerator(
+            signals=[LabPixelDiff()], config=MaskGeneratorConfig(global_max_cv=max_cv)
+        )
+
+
 # ----------------------------------------------------------------------
 # Orchestration with constant signals
 # ----------------------------------------------------------------------

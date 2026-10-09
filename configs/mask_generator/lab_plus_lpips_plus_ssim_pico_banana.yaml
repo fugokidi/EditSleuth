@@ -83,6 +83,20 @@ config:
   global_area_threshold: 0.90
   # Raised from 0.40 (MagicBrush) to 0.62 (Pico-Banana). See header.
   global_mean_threshold: 0.62
+  # Routing controls for the early whole-image route; null disables each (legacy behavior).
+  # Restrict the early routing map, e.g. [lab_pixel, ssim], without changing Otsu.
+  global_route_signals: null
+  # Require std/mean of the routing map <= this value as well as the mean
+  # threshold. 0.45 is a guard against large LOCAL edits being routed whole-
+  # image; with global_mean_threshold 0.62 it is inert on the 200-edit
+  # Pico-Banana evaluation subset (routing identical to null). The mean
+  # threshold, not this gate, limits recall of true global edits here; lowering
+  # it to ~0.4 together with 0.45 scored best against weak edit-type labels
+  # (balanced accuracy 0.64 -> 0.85) but also routes ~20% of local edits
+  # global, so verify with human mask review first. Values >= 0.45 are
+  # equivalent at 0.62; 0.15 would nearly disable global routing -- avoid.
+  # null restores the legacy mean-only routing.
+  global_max_cv: 0.45
   ambiguous_area_threshold: 0.005
   morph_disk_radius: 2
   min_component_area_frac: 0.001

@@ -46,6 +46,17 @@ config:
   allow_resize_align: true
   global_area_threshold: 0.90
   global_mean_threshold: 0.4
+  # Routing controls for the early whole-image route; null disables each (legacy behavior).
+  # Restrict the early routing map, e.g. [lab_pixel, ssim], without changing Otsu.
+  global_route_signals: null
+  # Require std/mean of the routing map <= this value as well as the mean
+  # threshold. 0.45 keeps large LOCAL edits (high mean, clear inside/outside
+  # contrast) out of the whole-image route: on MagicBrush dev it cuts all-white
+  # masks 19 -> 1 and lifts mean IoU 0.7305 -> 0.7408. Any value in 0.35-0.45
+  # is MagicBrush-feasible; 0.50 and above admit a 2nd white mask. Very low
+  # values (e.g. 0.15) also switch off true global routing -- avoid.
+  # null restores the legacy mean-only routing.
+  global_max_cv: 0.45
   ambiguous_area_threshold: 0.005
   morph_disk_radius: 2
   min_component_area_frac: 0.001

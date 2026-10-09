@@ -92,6 +92,15 @@ class MaskGeneratorConfig:
     #: marked as global (whole-image edit — morphology is pointless).
     skip_refinement_on_global: bool = True
 
+    #: Optional signal names used only for early global routing. None keeps
+    #: the full combined map; Otsu and artifact metadata always use all signals.
+    global_route_signals: list[str] | None = None
+
+    #: Optional upper bound on routing-map std/mean for the early mean route.
+    #: High mean can indicate a large local edit, not a uniform global change.
+    #: None preserves legacy routing. Uniform-map and Otsu-area exits remain.
+    global_max_cv: float | None = None
+
 
 class MaskGenerator:
     """Runs the Stage B pipeline on one triplet at a time.
@@ -128,6 +137,14 @@ class MaskGenerator:
         self.signals = signals
         self.config = config or MaskGeneratorConfig()
         self.combiner = combiner or MaxCombiner()
+        route_names = self.config.global_route_signals
+        if route_names is not None:
+            available = {s.name for s in signals}
+            if not route_names or set(route_names) - available:
+                raise ValueError("global_route_signals must select available signal names")
+        max_cv = self.config.global_max_cv
+        if max_cv is not None and (not np.isfinite(max_cv) or max_cv < 0):
+            raise ValueError("global_max_cv must be finite and nonnegative")
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -240,7 +257,12 @@ class MaskGenerator:
         combined, strongest = self._combine_signals(per_signal)
 
         # --- threshold + scope routing -------------------------------------
-        binary, scope, confidence = self._threshold(combined)
+        routing_map = combined
+        if self.config.global_route_signals is not None:
+            routing_map = self.combiner.combine(
+                {name: per_signal[name] for name in self.config.global_route_signals}
+            )
+        binary, scope, confidence = self._threshold(combined, routing_map)
 
         # --- morphological refinement --------------------------------------
         if not (self.config.skip_refinement_on_global and scope == "global"):
@@ -345,7 +367,7 @@ class MaskGenerator:
         return combined, strongest
 
     def _threshold(
-        self, combined: np.ndarray
+        self, combined: np.ndarray, routing_map: np.ndarray | None = None
     ) -> tuple[np.ndarray, EditScope, float]:
         """Otsu threshold the combined map; route degenerate cases.
 
@@ -354,13 +376,11 @@ class MaskGenerator:
         Scope at this stage is one of ``local`` / ``global`` / ``ambiguous``.
         ``alignment_failed`` is set later by the caller.
 
-        Global-edit detection runs *before* Otsu. This matters because on
-        a uniformly-shifted image (style transfer, color grade, global
-        tone map), every pixel has high diff but Otsu will still find a
-        threshold *within* the high-diff distribution, splitting the
-        image into "high" and "higher" bins and producing a meaningless
-        mask covering ~20% of the image. Instead, if the mean diff is
-        itself near-global, we treat the whole image as edited.
+        Early global detection protects spatially uniform high-difference maps
+        from meaningless Otsu subdivision. Legacy routing uses only the mean;
+        ``global_max_cv`` optionally requires low relative spatial variation
+        as well, preserving large local edits with clear inside/outside contrast.
+        ``routing_map`` may select fewer signals for this early route only.
         """
         flat = combined.ravel()
         if float(flat.std()) < 1e-4:
@@ -375,14 +395,17 @@ class MaskGenerator:
             return np.zeros_like(combined, dtype=bool), "ambiguous", 0.0
 
         # --- early global detection ---------------------------------------
-        # If the image's mean diff is itself high, the change is spread
-        # broadly enough that Otsu subdivision would be misleading.
-        # Using mean rather than "fraction above 0.5" is robust to
-        # saturating edits (clipping at 0/255 reduces per-pixel diff for
-        # some pixels even when the edit is clearly global).
-        if float(combined.mean()) >= self.config.global_mean_threshold:
-            confidence = float(np.clip(combined.mean(), 0.0, 1.0))
-            return np.ones_like(combined, dtype=bool), "global", confidence
+        route = combined if routing_map is None else routing_map
+        route_mean = float(route.mean())
+        if route_mean >= self.config.global_mean_threshold:
+            max_cv = self.config.global_max_cv
+            uniform_enough = (
+                max_cv is None
+                or (route_mean > 0 and float(route.std()) / route_mean <= max_cv)
+            )
+            if uniform_enough:
+                confidence = float(np.clip(route_mean, 0.0, 1.0))
+                return np.ones_like(combined, dtype=bool), "global", confidence
 
         try:
             thr = float(threshold_otsu(combined))
